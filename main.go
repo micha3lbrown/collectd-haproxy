@@ -13,6 +13,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -39,31 +40,32 @@ var (
 
 func main() {
 	var (
-		flagSocket = flag.String("socket", "/var/run/haproxy/admin.sock", "haproxy admin socket")
-		flagPlugin = flag.String("plugin", "haproxy", "plugin name")
-		flagSilent = flag.Bool("silent", false, "silent mode")
+		flagSocket   = flag.String("socket", "/tmp/haproxy.sock", "File path of the HAProxy admin socket")
+		flagPlugin   = flag.String("plugin", "collectd-haproxy", "Collectd Plugin name")
+		flagInterval = flag.Duration("interval", exec.Interval("10s"), "Desired polling interval for HAProxy")
+		flagDaemon   = flag.Bool("daemon", false, "Process HAProxy statistics in the background")
 	)
 	if flag.Parse(); flag.NArg() != 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	if *flagSilent {
+	if *flagDaemon {
 		log.SetOutput(ioutil.Discard)
 	}
 
 	socket = *flagSocket
 	plugin = *flagPlugin
+	interval = *flagInterval
 	hostname = exec.Hostname()
-	interval = exec.Interval()
 
 	e := exec.NewExecutor()
 	e.VoidCallback(collectInfo, interval)
 	e.VoidCallback(collectStats, interval)
-	e.Run()
+	e.Run(context.Background())
 }
 
-func collectInfo(interval time.Duration) {
+func collectInfo(ctx context.Context, interval time.Duration) {
 	now := time.Now()
 	buf := newBuffer()
 	defer freeBuffer(buf)
@@ -86,11 +88,11 @@ func collectInfo(interval time.Duration) {
 		}
 		key := string(bytes.ToLower(bytes.TrimSpace(line[:i])))
 		value := string(bytes.TrimSpace(line[i+1:]))
-		reportMetric(key, "", "", value, now, interval)
+		reportMetric(ctx, key, "", "", value, now, interval)
 	}
 }
 
-func collectStats(interval time.Duration) {
+func collectStats(ctx context.Context, interval time.Duration) {
 	now := time.Now()
 	buf := newBuffer()
 	defer freeBuffer(buf)
@@ -116,12 +118,12 @@ func collectStats(interval time.Duration) {
 		}
 		pxname, svname := record[0], record[1]
 		for i := 2; i < len(header) && i < len(record); i++ {
-			reportMetric(header[i], pxname, svname, record[i], now, interval)
+			reportMetric(ctx, header[i], pxname, svname, record[i], now, interval)
 		}
 	}
 }
 
-func reportMetric(key, pxname, svname, value string, now time.Time, interval time.Duration) {
+func reportMetric(ctx context.Context, key, pxname, svname, value string, now time.Time, interval time.Duration) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	m, ok := metricTypes[key]
 	if !ok {
@@ -139,7 +141,7 @@ func reportMetric(key, pxname, svname, value string, now time.Time, interval tim
 		name = strings.Join([]string{svname, pxname, name}, ".")
 	}
 
-	vl := api.ValueList{
+	vl := &api.ValueList{
 		Identifier: api.Identifier{
 			Host:         hostname,
 			Plugin:       plugin,
@@ -168,7 +170,7 @@ func reportMetric(key, pxname, svname, value string, now time.Time, interval tim
 		log.Println("invalid type", m.Type)
 		return
 	}
-	exec.Putval.Write(vl)
+	exec.Putval.Write(ctx, vl)
 }
 
 func communicate(command string, buf *bytes.Buffer) error {
